@@ -7,29 +7,13 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  check:
     runs-on: ubuntu-latest
-    env:
-      DATABASE_URL: sqlite:////tmp/forgestock-ci.db
-      SESSION_SECRET: ci-only-session-secret-do-not-use-in-production
-      COOKIE_SECURE: "false"
-      SEED_DEMO_DATA: "false"
-      ADMIN_USERNAME: ci-admin
-      ADMIN_PASSWORD: ci-test-password-not-production
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
-      - name: Install dependencies
-        run: python -m pip install -r requirements.txt pytest httpx
-      - name: Compile Python
-        run: python -m compileall -q app.py app
-      - name: Check browser JavaScript syntax
-        run: node --check app/static/app.js
-      - name: Run smoke tests
-        run: pytest -q
+          node-version: 22
+          cache: npm
+      - run: npm install
+      - run: npm test

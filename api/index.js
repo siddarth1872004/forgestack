@@ -1,0 +1,137 @@
+const { Pool } = require('pg');
+const crypto = require('crypto');
+
+let pool;
+const db = () => {
+  if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is not configured');
+  pool ||= new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+  return pool;
+};
+const query = (text, values = []) => db().query(text, values);
+const json = (res, status, body) => res.status(status).json(body);
+const fail = (res, status, message) => json(res, status, { error: message });
+const numeric = (value, label = 'Quantity') => {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) throw new Error(`${label} must be a non-negative number.`);
+  return number;
+};
+const cookie = (req, name) => Object.fromEntries((req.headers.cookie || '').split(';').filter(Boolean).map(value => value.trim().split('=')))[name];
+const token = () => crypto.createHmac('sha256', process.env.DATABASE_URL).update('admin').digest('base64url');
+const passwordMatches = input => {
+  const expected = Buffer.from(process.env.ADMIN_PASSWORD || ''), received = Buffer.from(String(input || ''));
+  return expected.length > 0 && expected.length === received.length && crypto.timingSafeEqual(expected, received);
+};
+const authorised = req => cookie(req, 'forgestock_session') === token();
+const requireAuth = (req, res) => authorised(req) || (fail(res, 401, 'Authentication required.'), false);
+const body = req => req.body || {};
+const rows = result => result.rows;
+const itemSelect = `select r.id, r.material_code as code, r.name, r.unit, r.quantity::float, r.min_stock::float,
+  c.name as category, r.supplier_id, coalesce(s.name, '—') as supplier
+  from raw_materials r join raw_material_categories c on c.id=r.category_id left join suppliers s on s.id=r.supplier_id`;
+const serializeMaterial = row => ({ ...row, status: row.quantity <= row.min_stock ? 'Low Stock' : 'In Stock' });
+const productSelect = `select id, product_code as code, name, unit, quantity::float, min_stock::float from products`;
+const serializeProduct = row => ({ ...row, status: row.quantity <= row.min_stock ? 'Low Stock' : 'In Stock' });
+
+async function bootstrap() {
+  await query(`insert into raw_material_categories(name) values ('Metals'),('Polymers'),('Packaging'),('Electrical') on conflict (name) do nothing`);
+}
+async function transaction(client, { itemType, itemId, itemName, type, quantity, reference = null, note = null }) {
+  await client.query(`insert into inventory_transactions(item_type,item_id,item_name,transaction_type,quantity,reference,note)
+    values($1,$2,$3,$4,$5,$6,$7)`, [itemType, itemId, itemName, type, quantity, reference, note]);
+}
+function route(req) { return new URL(req.url, 'https://forgestock.local').pathname.replace(/^\/api\/?/, ''); }
+
+module.exports = async (req, res) => {
+  try {
+    await bootstrap();
+    const path = route(req), method = req.method, payload = body(req);
+    if (path === 'health') {
+      await query('select 1');
+      return json(res, 200, { status: 'ok', database_configured: true, database_connected: true, mode: 'supabase' });
+    }
+    if (path === 'session') return json(res, 200, { authenticated: authorised(req), username: authorised(req) ? 'admin' : null });
+    if (path === 'login' && method === 'POST') {
+      if (!passwordMatches(payload.password)) return fail(res, 401, 'Invalid password.');
+      res.setHeader('Set-Cookie', `forgestock_session=${token()}; Path=/; HttpOnly; SameSite=Lax; ${process.env.VERCEL ? 'Secure; ' : ''}Max-Age=28800`);
+      return json(res, 200, { ok: true, username: 'admin' });
+    }
+    if (path === 'logout' && method === 'POST') {
+      res.setHeader('Set-Cookie', 'forgestock_session=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0');
+      return json(res, 200, { ok: true });
+    }
+    if (!requireAuth(req, res)) return;
+
+    if (path === 'dashboard') {
+      const [materials, low, finished, active, completed, transactions] = await Promise.all([
+        query('select count(*)::int as count from raw_materials'), query('select count(*)::int as count from raw_materials where quantity <= min_stock'),
+        query('select coalesce(sum(quantity),0)::float as value from products'), query(`select count(*)::int as count from production_orders where status in ('Pending','In Progress')`),
+        query(`select o.id,o.order_code as code,p.name as product,o.quantity::float,o.status,o.created_at,o.completed_at from production_orders o join products p on p.id=o.product_id where o.status='Completed' order by o.completed_at desc limit 5`),
+        query(`select id,item_type,item_name,transaction_type as type,quantity::float,reference,note,created_at from inventory_transactions order by created_at desc limit 8`)
+      ]);
+      return json(res, 200, { total_materials: materials.rows[0].count, low_stock: low.rows[0].count, finished_qty: finished.rows[0].value, active_orders: active.rows[0].count, completed: rows(completed), transactions: rows(transactions) });
+    }
+    if (path === 'materials' && method === 'GET') {
+      const result = await query(`${itemSelect} order by r.name`);
+      const [categories, suppliers] = await Promise.all([query('select name from raw_material_categories order by name'), query('select id,name from suppliers order by name')]);
+      return json(res, 200, { items: rows(result).map(serializeMaterial), categories: rows(categories).map(row => row.name), suppliers: rows(suppliers) });
+    }
+    if (path === 'materials' && method === 'POST') {
+      const quantity = numeric(payload.quantity), minStock = numeric(payload.min_stock, 'Minimum stock');
+      if (!payload.code || !payload.name || !payload.unit || !payload.category) return fail(res, 400, 'Code, name, unit and category are required.');
+      const inserted = await query(`insert into raw_materials(material_code,name,unit,quantity,min_stock,category_id,supplier_id)
+        select $1,$2,$3,$4,$5,id,$6 from raw_material_categories where name=$7 returning id`, [payload.code.trim(), payload.name.trim(), payload.unit.trim(), quantity, minStock, payload.supplier_id || null, payload.category]);
+      if (!inserted.rowCount) return fail(res, 400, 'Unknown category.');
+      const result = await query(`${itemSelect} where r.id=$1`, [inserted.rows[0].id]);
+      return json(res, 200, serializeMaterial(result.rows[0]));
+    }
+    if (path === 'products' && method === 'GET') return json(res, 200, { items: rows(await query(`${productSelect} order by name`)).map(serializeProduct) });
+    if (path === 'products' && method === 'POST') {
+      const quantity = numeric(payload.quantity), minStock = numeric(payload.min_stock, 'Minimum stock');
+      const result = await query(`insert into products(product_code,name,unit,quantity,min_stock) values($1,$2,$3,$4,$5) returning id`, [payload.code, payload.name, payload.unit || 'units', quantity, minStock]);
+      return json(res, 200, serializeProduct((await query(`${productSelect} where id=$1`, [result.rows[0].id])).rows[0]));
+    }
+    if (path === 'inventory') {
+      const [materials, products] = await Promise.all([query(`${itemSelect} order by r.name`), query(`${productSelect} order by name`)]);
+      return json(res, 200, { items: [...rows(materials).map(row => ({ type: 'Raw Material', ...serializeMaterial(row) })), ...rows(products).map(row => ({ type: 'Finished Good', ...serializeProduct(row) }))] });
+    }
+    if (path === 'transactions') return json(res, 200, { items: rows(await query(`select id,item_type,item_name,transaction_type as type,quantity::float,reference,note,created_at from inventory_transactions order by created_at desc limit 200`)) });
+    if (path === 'suppliers' && method === 'GET') return json(res, 200, { items: rows(await query(`select s.id,s.name,s.contact,s.email,count(r.id)::int as materials_count from suppliers s left join raw_materials r on r.supplier_id=s.id group by s.id order by s.name`)) });
+    if (path === 'suppliers' && method === 'POST') {
+      if (!payload.name?.trim()) return fail(res, 400, 'Supplier name is required.');
+      return json(res, 200, (await query('insert into suppliers(name,contact,email) values($1,$2,$3) returning id,name,contact,email,0::int as materials_count', [payload.name.trim(), payload.contact || null, payload.email || null])).rows[0]);
+    }
+    if (path === 'orders' && method === 'GET') return json(res, 200, { items: rows(await query(`select o.id,o.order_code as code,p.name as product,o.product_id,o.quantity::float,o.status,o.created_at,o.started_at,o.completed_at from production_orders o join products p on p.id=o.product_id order by o.created_at desc`)) });
+    if (path === 'orders' && method === 'POST') {
+      const quantity = numeric(payload.quantity, 'Production quantity'); if (!quantity) return fail(res, 400, 'Production quantity must be greater than zero.');
+      const code = `PO-${new Date().getFullYear()}-${crypto.randomInt(100000, 1000000)}`;
+      const result = await query('insert into production_orders(order_code,product_id,quantity) values($1,$2,$3) returning id', [code, payload.product_id, quantity]);
+      return json(res, 200, (await query(`select o.id,o.order_code as code,p.name as product,o.product_id,o.quantity::float,o.status,o.created_at,o.started_at,o.completed_at from production_orders o join products p on p.id=o.product_id where o.id=$1`, [result.rows[0].id])).rows[0]);
+    }
+    const match = path.match(/^orders\/(\d+)\/(start|consume|complete)$/);
+    if (match && method === 'POST') {
+      const [, id, action] = match, client = await db().connect();
+      try {
+        await client.query('begin');
+        const order = (await client.query(`select o.*,p.name as product_name,p.quantity as product_quantity from production_orders o join products p on p.id=o.product_id where o.id=$1 for update`, [id])).rows[0];
+        if (!order) throw new Error('Production order not found.');
+        if (action === 'start') { if (order.status !== 'Pending') throw new Error('Only pending orders can be started.'); await client.query(`update production_orders set status='In Progress',started_at=now() where id=$1`, [id]); }
+        if (action === 'consume') {
+          const quantity = numeric(payload.quantity); if (!quantity) throw new Error('Consumption quantity must be greater than zero.');
+          const material = (await client.query('select * from raw_materials where id=$1 for update', [payload.material_id])).rows[0];
+          if (!material) throw new Error('Material not found.'); if (Number(material.quantity) < quantity) throw new Error('Insufficient material stock.');
+          await client.query('update raw_materials set quantity=quantity-$1 where id=$2', [quantity, material.id]);
+          await client.query('insert into material_consumptions(production_order_id,material_id,quantity) values($1,$2,$3)', [id, material.id, quantity]);
+          await transaction(client, { itemType: 'Raw Material', itemId: material.id, itemName: material.name, type: 'Stock Out', quantity, reference: order.order_code, note: 'Material consumed for production' });
+        }
+        if (action === 'complete') {
+          if (order.status === 'Completed') throw new Error('Production order is already completed.');
+          const uses = await client.query('select 1 from material_consumptions where production_order_id=$1 limit 1', [id]); if (!uses.rowCount) throw new Error('Issue at least one raw material before completing production.');
+          await client.query(`update production_orders set status='Completed',completed_at=now() where id=$1`, [id]); await client.query('update products set quantity=quantity+$1 where id=$2', [order.quantity, order.product_id]);
+          await transaction(client, { itemType: 'Finished Good', itemId: order.product_id, itemName: order.product_name, type: 'Stock In', quantity: Number(order.quantity), reference: order.order_code, note: 'Production completed' });
+        }
+        await client.query('commit'); return json(res, 200, { ok: true });
+      } catch (error) { await client.query('rollback'); return fail(res, 400, error.message); } finally { client.release(); }
+    }
+    return fail(res, 404, 'Route not found.');
+  } catch (error) { console.error(error); return fail(res, 500, 'The server could not complete this request.'); }
+};
