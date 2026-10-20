@@ -1,4 +1,4 @@
-const app=document.getElementById('app');let currentPage='dashboard';let currentData={};
+const app=document.getElementById('app');let currentPage='dashboard';let currentData={};let refreshTimer;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 const fmt=n=>new Intl.NumberFormat('en-IN',{maximumFractionDigits:2}).format(n??0); const date=s=>s?new Date(s+'Z').toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):'—';
 async function api(url,opt={}){const r=await fetch(url,{headers:{'Content-Type':'application/json',...(opt.headers||{})},...opt});const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.detail||'Request failed');return d}
@@ -36,3 +36,7 @@ function closeModal(){document.getElementById('modal-root').innerHTML=''}
 async function reloadCurrent(){try{await render(currentPage)}catch(e){toast(e.message)}}
 document.querySelectorAll('.nav-item').forEach(b=>b.addEventListener('click',()=>render(b.dataset.page)));
 render().catch(e=>{app.innerHTML=`<section class="panel"><h2>Could not load ForgeStock</h2><p>${esc(e.message)}</p><p>Check your database and sign-in configuration, then refresh.</p></section>`});
+
+// Surface connectivity failures without silently hiding a stale dashboard.
+window.addEventListener('online',()=>toast('Connection restored'));
+window.addEventListener('offline',()=>toast('You are offline. Changes cannot be saved until the connection returns.'));
