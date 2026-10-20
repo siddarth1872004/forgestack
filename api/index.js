@@ -99,6 +99,17 @@ module.exports = async (req, res) => {
       const result = await query(`${itemSelect} where r.id=$1`, [inserted.rows[0].id]);
       return json(res, 200, serializeMaterial(result.rows[0]));
     }
+    const materialRoute = path.match(/^materials\/(\d+)$/);
+    if (materialRoute && method === 'PUT') {
+      const updated = await query('update raw_materials set name=$1,unit=$2,min_stock=$3 where id=$4 returning id', [String(payload.name || '').trim(), payload.unit, numeric(payload.min_stock, 'Minimum stock'), materialRoute[1]]);
+      if (!updated.rowCount) return fail(res, 404, 'Material not found.');
+      return json(res, 200, serializeMaterial((await query(`${itemSelect} where r.id=$1`, [materialRoute[1]])).rows[0]));
+    }
+    if (materialRoute && method === 'DELETE') {
+      if ((await query('select 1 from material_consumptions where material_id=$1 limit 1', [materialRoute[1]])).rowCount) return fail(res, 409, 'Material has production history and cannot be deleted.');
+      const deleted = await query('delete from raw_materials where id=$1', [materialRoute[1]]);
+      return deleted.rowCount ? json(res, 200, { ok: true }) : fail(res, 404, 'Material not found.');
+    }
     if (path === 'products' && method === 'GET') return json(res, 200, { items: rows(await query(`${productSelect} order by name`)).map(serializeProduct) });
     if (path === 'products' && method === 'POST') {
       const quantity = numeric(payload.quantity), minStock = numeric(payload.min_stock, 'Minimum stock');
