@@ -25,9 +25,9 @@ def verify_password(password: str, stored_hash: str) -> bool:
             return hmac.compare_digest(base64.urlsafe_b64encode(actual).decode().rstrip("="), digest)
         except (ValueError, TypeError):
             return False
-    return os.getenv("SEED_DEMO_DATA", "").lower() in {"1", "true", "yes"} and stored_hash == password
+    return os.getenv("SEED_DEMO_DATA", "").lower() in {"1", "true", "yes"} and secrets.compare_digest(stored_hash, password)
 
-app = FastAPI(title="ForgeStock Inventory Management System", version="1.1.0")
+app = FastAPI(title="ForgeStock Inventory Management System", version="1.1.1")
 if os.getenv("VERCEL") and not os.getenv("DATABASE_URL"):
     @app.on_event("startup")
     def require_database_for_vercel():
@@ -38,6 +38,10 @@ templates = Jinja2Templates(directory=str(BASE / "templates"))
 
 @app.on_event("startup")
 def startup():
+    if os.getenv("VERCEL") and (not os.getenv("SESSION_SECRET") or os.getenv("SESSION_SECRET") == "local-development-only-change-this-secret"):
+        raise RuntimeError("Set SESSION_SECRET to a long random value in Vercel environment variables.")
+    if os.getenv("VERCEL") and os.getenv("SEED_DEMO_DATA", "").lower() in {"1", "true", "yes"}:
+        raise RuntimeError("SEED_DEMO_DATA is only for disposable local demos. Disable it on Vercel.")
     init_db()
     if os.getenv("SEED_DEMO_DATA", "").lower() in {"1", "true", "yes"}:
         db = SessionLocal()
