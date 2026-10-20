@@ -16,6 +16,8 @@ ForgeStock is a FastAPI inventory dashboard for raw materials, finished goods, s
    - `DATABASE_URL`: the Supabase PostgreSQL connection string from Project Settings → Database → Connection string. URL-encode special password characters.
    - `SESSION_SECRET`: a long random value generated with `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
    - `COOKIE_SECURE=true`.
+   - `ADMIN_USERNAME`: the username for the first administrator account.
+   - `ADMIN_PASSWORD`: a unique password of at least 12 characters. The app hashes it before storing it and creates the account on startup if it does not already exist.
    - Leave `SEED_DEMO_DATA` unset or false in production.
 5. Deploy and check `/api/health`. It should report `mode: supabase`.
 
@@ -31,12 +33,14 @@ Browse to http://127.0.0.1:8000.
 
 ## Modules included
 - Dashboard with counts, recent completed jobs and transaction activity
-- Raw-material create/edit/delete and category filtering
-- Combined inventory view and finished-goods summary
-- Inventory transactions
+- Raw-material create/edit/delete, supplier assignment, category filtering and stock validation
+- Combined inventory view, finished-goods create/edit/delete and audited stock adjustments
+- Supplier contact management and inventory transactions
 - Production-order create/start/consume/complete workflow
 - Material-consumption history
-- Inventory, production and consumption reports
+- Inventory, production and consumption reports with date filters
+- `/api/health` performs a real database connectivity check without exposing credentials
+- GitHub Actions CI checks Python compilation, JavaScript syntax and smoke tests
 
 ## Security/readiness limitations
-The inherited login is **not Supabase Auth**. It uses the legacy `users` table and currently has no account-provisioning workflow or tenant isolation. Legacy seeded plaintext credentials are only accepted when `SEED_DEMO_DATA=true`; do not enable that setting in production. Keep the site private until login is migrated to Supabase Auth and authorization/RLS is designed and tested. Supplier-management and settings pages are placeholders. Do not expose database credentials or service-role keys in browser code.
+The inherited login uses the private `users` table with PBKDF2-SHA256 password hashes for provisioned accounts; it is not Supabase Auth and does not yet support password reset, invitations, multi-tenant isolation, or a self-service account-management flow. Use `ADMIN_USERNAME` and `ADMIN_PASSWORD` to create the first administrator. Legacy seeded plaintext credentials are accepted only when `SEED_DEMO_DATA=true`; do not enable that setting in production. Keep the deployment private to trusted users until a full access-control review and any needed tenant isolation are completed. Do not expose database credentials or service-role keys in browser code.
