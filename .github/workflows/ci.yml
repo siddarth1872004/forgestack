@@ -14,6 +14,8 @@ jobs:
       SESSION_SECRET: ci-only-session-secret-do-not-use-in-production
       COOKIE_SECURE: "false"
       SEED_DEMO_DATA: "false"
+      ADMIN_USERNAME: ci-admin
+      ADMIN_PASSWORD: ci-test-password-not-production
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
