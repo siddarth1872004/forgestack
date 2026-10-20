@@ -7,7 +7,14 @@ from .models import Base
 
 raw_url = os.getenv("DATABASE_URL", "").strip()
 if raw_url:
-    DATABASE_URL = raw_url.replace("postgres://", "postgresql://", 1)
+    # requirements.txt installs psycopg v3, not psycopg2. Explicitly select
+    # SQLAlchemy's psycopg v3 dialect for standard PostgreSQL/Supabase URLs.
+    if raw_url.startswith("postgres://"):
+        DATABASE_URL = raw_url.replace("postgres://", "postgresql+psycopg://", 1)
+    elif raw_url.startswith("postgresql://"):
+        DATABASE_URL = raw_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    else:
+        DATABASE_URL = raw_url
 else:
     DATABASE_PATH = Path(__file__).resolve().parent.parent / "inventory.db"
     DATABASE_URL = f"sqlite:///{DATABASE_PATH.as_posix()}"
