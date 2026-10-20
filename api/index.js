@@ -110,6 +110,14 @@ module.exports = async (req, res) => {
       return json(res, 200, { items: [...rows(materials).map(row => ({ type: 'Raw Material', ...serializeMaterial(row) })), ...rows(products).map(row => ({ type: 'Finished Good', ...serializeProduct(row) }))] });
     }
     if (path === 'transactions') return json(res, 200, { items: rows(await query(`select id,item_type,item_name,transaction_type as type,quantity::float,reference,note,created_at from inventory_transactions order by created_at desc limit 200`)) });
+    if (path === 'consumptions') return json(res, 200, { items: rows(await query(`select c.id,o.order_code as "order",r.name as material,c.quantity::float,r.unit,c.consumed_at from material_consumptions c join production_orders o on o.id=c.production_order_id join raw_materials r on r.id=c.material_id order by c.consumed_at desc limit 300`)) });
+    if (path === 'reports') {
+      const kind = new URL(req.url, 'https://forgestock.local').searchParams.get('kind') || 'inventory';
+      if (kind === 'production') return json(res, 200, { items: rows(await query(`select o.id,o.order_code as code,p.name as product,o.quantity::float,o.status,o.created_at from production_orders o join products p on p.id=o.product_id order by o.created_at desc`)) });
+      if (kind === 'consumption') return json(res, 200, { items: rows(await query(`select c.id,o.order_code as "order",r.name as material,c.quantity::float,r.unit,c.consumed_at from material_consumptions c join production_orders o on o.id=c.production_order_id join raw_materials r on r.id=c.material_id order by c.consumed_at desc`)) });
+      const [materials, products] = await Promise.all([query(`${itemSelect} order by r.name`), query(`${productSelect} order by name`)]);
+      return json(res, 200, { items: [...rows(materials).map(row => ({ type: 'Raw Material', ...serializeMaterial(row) })), ...rows(products).map(row => ({ type: 'Finished Good', ...serializeProduct(row) }))] });
+    }
     if (path === 'suppliers' && method === 'GET') return json(res, 200, { items: rows(await query(`select s.id,s.name,s.contact,s.email,count(r.id)::int as materials_count from suppliers s left join raw_materials r on r.supplier_id=s.id group by s.id order by s.name`)) });
     if (path === 'suppliers' && method === 'POST') {
       if (!payload.name?.trim()) return fail(res, 400, 'Supplier name is required.');
