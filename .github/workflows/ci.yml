@@ -1,4 +1,4 @@
-name: CI
+name: ForgeStock CI
 
 on:
   push:
