@@ -114,16 +114,17 @@ def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request, "user": request.session.get("user")})
 
 @app.get("/login", response_class=HTMLResponse)
-def login_page(request: Request):
+def login_page(request: Request, db: Session = Depends(get_db)):
     demo_mode = os.getenv("SEED_DEMO_DATA", "").lower() in {"1", "true", "yes"}
-    return templates.TemplateResponse("login.html", {"request": request, "error": None, "demo_mode": demo_mode})
+    account_configured = db.query(User).filter(User.is_active == True).count() > 0
+    return templates.TemplateResponse("login.html", {"request": request, "error": None, "demo_mode": demo_mode, "account_configured": account_configured})
 
 @app.post("/login")
 def login(request: Request, username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username, User.is_active == True).first()
     if not user or not verify_password(password, user.password_hash):
         demo_mode = os.getenv("SEED_DEMO_DATA", "").lower() in {"1", "true", "yes"}
-        return templates.TemplateResponse("login.html", {"request": request, "error": "Invalid username or password.", "demo_mode": demo_mode}, status_code=401)
+        return templates.TemplateResponse("login.html", {"request": request, "error": "Invalid username or password.", "demo_mode": demo_mode, "account_configured": db.query(User).filter(User.is_active == True).count() > 0}, status_code=401)
     request.session["user"] = {"id": user.id, "username": user.username, "role": user.role}
     return RedirectResponse("/", status_code=303)
 
