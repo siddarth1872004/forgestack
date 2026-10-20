@@ -130,7 +130,7 @@ def logout(request: Request):
 
 def serialize_material(m):
     return {"id": m.id, "code": m.material_code, "name": m.name, "category": m.category.name if m.category else "Uncategorized", "unit": m.unit,
-            "quantity": float(m.quantity), "min_stock": float(m.min_stock), "supplier": m.supplier.name if m.supplier else "—", "status": "Low Stock" if m.quantity <= m.min_stock else "In Stock"}
+            "quantity": float(m.quantity), "min_stock": float(m.min_stock), "supplier": m.supplier.name if m.supplier else "—", "supplier_id": m.supplier_id, "status": "Low Stock" if m.quantity <= m.min_stock else "In Stock"}
 def serialize_product(p):
     return {"id": p.id, "code": p.product_code, "name": p.name, "unit": p.unit, "quantity": float(p.quantity), "min_stock": float(p.min_stock), "status": "Low Stock" if p.quantity <= p.min_stock else "In Stock"}
 def serialize_order(o):
@@ -151,7 +151,7 @@ def materials(request: Request, q: str = "", category: str = "", db: Session = D
     auth(request); query = db.query(RawMaterial).options(joinedload(RawMaterial.category), joinedload(RawMaterial.supplier)).order_by(RawMaterial.name)
     if q: query = query.filter(or_(RawMaterial.name.ilike(f"%{q}%"), RawMaterial.material_code.ilike(f"%{q}%")))
     if category: query = query.join(RawMaterialCategory).filter(RawMaterialCategory.name == category)
-    return {"items": [serialize_material(m) for m in query.all()], "categories": [c.name for c in db.query(RawMaterialCategory).order_by(RawMaterialCategory.name).all()]}
+    return {"items": [serialize_material(m) for m in query.all()], "categories": [c.name for c in db.query(RawMaterialCategory).order_by(RawMaterialCategory.name).all()], "suppliers": [{"id": s.id, "name": s.name} for s in db.query(Supplier).order_by(Supplier.name).all()]}
 
 @app.post("/api/materials")
 def add_material(request: Request, payload: dict, db: Session = Depends(get_db)):
@@ -163,7 +163,10 @@ def add_material(request: Request, payload: dict, db: Session = Depends(get_db))
     if db.query(RawMaterial).filter(RawMaterial.material_code == payload["code"]).first(): raise HTTPException(409, "Material code already exists.")
     category = db.query(RawMaterialCategory).filter_by(name=payload["category"]).first()
     if not category: raise HTTPException(400, "Unknown category.")
-    supplier = db.query(Supplier).filter_by(id=payload.get("supplier_id")).first() if payload.get("supplier_id") else None
+    supplier_id = payload.get("supplier_id")
+    supplier = db.get(Supplier, int(supplier_id)) if supplier_id not in (None, "", 0, "0") else None
+    if supplier_id not in (None, "", 0, "0") and not supplier:
+        raise HTTPException(400, "Unknown supplier.")
     m = RawMaterial(material_code=payload["code"].strip(), name=payload["name"].strip(), unit=payload["unit"], quantity=qty, min_stock=minimum, category=category, supplier=supplier)
     db.add(m); db.flush()
     if qty: create_transaction(db, item_type="Raw Material", item_id=m.id, item_name=m.name, transaction_type="Stock In", quantity=qty, note="Opening stock")
@@ -176,7 +179,14 @@ def edit_material(request: Request, material_id: int, payload: dict, db: Session
     try: minimum = Decimal(str(payload["min_stock"]))
     except Exception: raise HTTPException(400, "Minimum stock must be numeric.")
     if minimum < 0: raise HTTPException(400, "Minimum stock cannot be negative.")
-    m.name = payload["name"].strip(); m.unit = payload["unit"]; m.min_stock = minimum
+    m.name = str(payload.get("name", "")).strip(); m.unit = str(payload.get("unit", m.unit)).strip(); m.min_stock = minimum
+    if not m.name or len(m.name) > 120:
+        raise HTTPException(400, "Material name is required and must be 120 characters or fewer.")
+    supplier_id = payload.get("supplier_id")
+    supplier = db.get(Supplier, int(supplier_id)) if supplier_id not in (None, "", 0, "0") else None
+    if supplier_id not in (None, "", 0, "0") and not supplier:
+        raise HTTPException(400, "Unknown supplier.")
+    m.supplier = supplier
     db.commit(); db.refresh(m); return serialize_material(m)
 
 @app.delete("/api/materials/{material_id}")
@@ -218,8 +228,16 @@ def create_order(request: Request, payload: dict, db: Session = Depends(get_db))
     if qty <= 0: raise HTTPException(400, "Production quantity must be greater than zero.")
     product = db.query(Product).get(payload.get("product_id"))
     if not product: raise HTTPException(404, "Product not found.")
-    count = db.query(ProductionOrder).count() + 142
-    o = ProductionOrder(order_code=f"PO-{datetime.utcnow().year}-{count:04d}", product=product, quantity=qty)
+    # Avoid collisions with imported orders or gaps left by deleted records.
+    order_code = None
+    for _ in range(12):
+        candidate = f"PO-{datetime.utcnow().year}-{secrets.randbelow(900000) + 100000}"
+        if not db.query(ProductionOrder).filter_by(order_code=candidate).first():
+            order_code = candidate
+            break
+    if not order_code:
+        raise HTTPException(503, "Could not allocate a production order number. Please retry.")
+    o = ProductionOrder(order_code=order_code, product=product, quantity=qty)
     db.add(o); db.commit(); db.refresh(o); return serialize_order(o)
 
 @app.post("/api/orders/{order_id}/start")
