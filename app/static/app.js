@@ -40,3 +40,6 @@ render().catch(e=>{app.innerHTML=`<section class="panel"><h2>Could not load Forg
 // Surface connectivity failures without silently hiding a stale dashboard.
 window.addEventListener('online',()=>toast('Connection restored'));
 window.addEventListener('offline',()=>toast('You are offline. Changes cannot be saved until the connection returns.'));
+
+window.addEventListener('online',()=>toast('Connection restored'));
+window.addEventListener('offline',()=>toast('You are offline. Changes cannot be saved until the connection returns.'));
