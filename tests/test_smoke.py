@@ -1,4 +1,9 @@
 import os
+import sys
+from pathlib import Path
+
+# Ensure the repository root is importable when pytest is invoked as a console script.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # CI provides a disposable SQLite URL before the app is imported.
 os.environ.setdefault("DATABASE_URL", "sqlite:////tmp/forgestock-test.db")
