@@ -8,7 +8,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import or_, desc
+from sqlalchemy import or_, desc, func
+from .db import engine
 from .db import init_db, get_db, SessionLocal
 from .models import User, RawMaterial, RawMaterialCategory, Supplier, Product, ProductionOrder, MaterialConsumption, InventoryTransaction
 from .services import seed_demo, dashboard, consume_material, complete_order, create_transaction
@@ -36,6 +37,13 @@ if os.getenv("VERCEL") and not os.getenv("DATABASE_URL"):
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 
+def hash_password(password: str, *, salt: str | None = None, rounds: int = 310_000) -> str:
+    """Return a versioned PBKDF2-SHA256 password hash."""
+    import base64, hashlib
+    salt = salt or secrets.token_urlsafe(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), rounds)
+    return f"pbkdf2_sha256${rounds}${salt}${base64.urlsafe_b64encode(digest).decode().rstrip('=')}"
+
 @app.on_event("startup")
 def startup():
     if os.getenv("VERCEL") and (not os.getenv("SESSION_SECRET") or os.getenv("SESSION_SECRET") == "local-development-only-change-this-secret"):
@@ -43,12 +51,30 @@ def startup():
     if os.getenv("VERCEL") and os.getenv("SEED_DEMO_DATA", "").lower() in {"1", "true", "yes"}:
         raise RuntimeError("SEED_DEMO_DATA is only for disposable local demos. Disable it on Vercel.")
     init_db()
-    if os.getenv("SEED_DEMO_DATA", "").lower() in {"1", "true", "yes"}:
-        db = SessionLocal()
-        try:
+    db = SessionLocal()
+    try:
+        if os.getenv("SEED_DEMO_DATA", "").lower() in {"1", "true", "yes"}:
             seed_demo(db)
-        finally:
-            db.close()
+        # Lookup categories are reference data required by the existing material form.
+        for category_name in ("Metals", "Polymers", "Packaging", "Electrical"):
+            if not db.query(RawMaterialCategory).filter_by(name=category_name).first():
+                db.add(RawMaterialCategory(name=category_name))
+        # Secure first-admin provisioning: configure these only in server-side env vars.
+        # Never create a predictable production password or expose this workflow publicly.
+        admin_username = os.getenv("ADMIN_USERNAME", "").strip()
+        admin_password = os.getenv("ADMIN_PASSWORD", "")
+        if admin_username and admin_password:
+            if len(admin_password) < 12:
+                raise RuntimeError("ADMIN_PASSWORD must be at least 12 characters.")
+            existing = db.query(User).filter_by(username=admin_username).first()
+            if not existing:
+                db.add(User(username=admin_username, password_hash=hash_password(admin_password), role="admin", is_active=True))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 def auth(request: Request):
     if not request.session.get("user"):
@@ -65,7 +91,17 @@ app.add_middleware(
 @app.get("/api/health")
 def health():
     configured = bool(os.getenv("DATABASE_URL", "").strip())
-    return {"status": "ok", "database_configured": configured, "mode": "supabase" if configured else "local-sqlite"}
+    try:
+        from sqlalchemy import text
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        return {"status": "ok", "database_configured": configured, "database_connected": True,
+                "mode": "supabase" if configured else "local-sqlite"}
+    except Exception:
+        # Deliberately avoid returning credentials, hostnames, or raw DB errors.
+        return JSONResponse({"status": "error", "database_configured": configured,
+                             "database_connected": False, "mode": "supabase" if configured else "local-sqlite"},
+                            status_code=503)
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
@@ -238,3 +274,155 @@ def reports(request: Request, kind: str="inventory", q: str="", from_date: str="
         if q: rows = [r for r in rows if q.lower() in (r.material.name + " " + r.production_order.order_code).lower()]
         return {"items": [{"id": r.id, "order": r.production_order.order_code, "material": r.material.name, "quantity": float(r.quantity), "unit": r.material.unit, "consumed_at": r.consumed_at.isoformat()} for r in rows]}
     return inventory(request, q=q, db=db)
+
+# Supplier master-data endpoints used by the existing Suppliers navigation.
+def serialize_supplier(s):
+    return {"id": s.id, "name": s.name, "contact": s.contact or "", "email": s.email or "",
+            "materials_count": len(s.materials)}
+
+@app.get("/api/suppliers")
+def list_suppliers(request: Request, q: str = "", db: Session = Depends(get_db)):
+    auth(request)
+    query = db.query(Supplier).order_by(Supplier.name)
+    if q:
+        query = query.filter(or_(Supplier.name.ilike(f"%{q}%"), Supplier.contact.ilike(f"%{q}%"), Supplier.email.ilike(f"%{q}%")))
+    return {"items": [serialize_supplier(s) for s in query.all()]}
+
+@app.post("/api/suppliers")
+def add_supplier(request: Request, payload: dict, db: Session = Depends(get_db)):
+    auth(request)
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        raise HTTPException(400, "Supplier name is required.")
+    if len(name) > 120:
+        raise HTTPException(400, "Supplier name must be 120 characters or fewer.")
+    email = str(payload.get("email", "")).strip() or None
+    contact = str(payload.get("contact", "")).strip() or None
+    if email and (len(email) > 120 or "@" not in email):
+        raise HTTPException(400, "Enter a valid supplier email address.")
+    supplier = Supplier(name=name, contact=contact, email=email)
+    db.add(supplier)
+    db.commit()
+    db.refresh(supplier)
+    return serialize_supplier(supplier)
+
+@app.put("/api/suppliers/{supplier_id}")
+def edit_supplier(request: Request, supplier_id: int, payload: dict, db: Session = Depends(get_db)):
+    auth(request)
+    supplier = db.get(Supplier, supplier_id)
+    if not supplier:
+        raise HTTPException(404, "Supplier not found.")
+    name = str(payload.get("name", "")).strip()
+    email = str(payload.get("email", "")).strip() or None
+    if not name or len(name) > 120:
+        raise HTTPException(400, "Supplier name is required and must be 120 characters or fewer.")
+    if email and (len(email) > 120 or "@" not in email):
+        raise HTTPException(400, "Enter a valid supplier email address.")
+    supplier.name = name
+    supplier.contact = str(payload.get("contact", "")).strip() or None
+    supplier.email = email
+    db.commit()
+    db.refresh(supplier)
+    return serialize_supplier(supplier)
+
+@app.delete("/api/suppliers/{supplier_id}")
+def delete_supplier(request: Request, supplier_id: int, db: Session = Depends(get_db)):
+    auth(request)
+    supplier = db.get(Supplier, supplier_id)
+    if not supplier:
+        raise HTTPException(404, "Supplier not found.")
+    if db.query(RawMaterial).filter_by(supplier_id=supplier_id).count():
+        raise HTTPException(409, "This supplier is assigned to raw materials. Reassign them before deleting.")
+    db.delete(supplier)
+    db.commit()
+    return {"ok": True}
+
+# Finished-goods master-data endpoints complete the existing product workflow.
+@app.post("/api/products")
+def add_product(request: Request, payload: dict, db: Session = Depends(get_db)):
+    auth(request)
+    code = str(payload.get("code", "")).strip()
+    name = str(payload.get("name", "")).strip()
+    unit = str(payload.get("unit", "units")).strip() or "units"
+    try:
+        qty = Decimal(str(payload.get("quantity", 0)))
+        minimum = Decimal(str(payload.get("min_stock", 0)))
+        if not code or not name or len(code) > 30 or len(name) > 120 or qty < 0 or minimum < 0:
+            raise ValueError()
+    except (InvalidOperation, ValueError):
+        raise HTTPException(400, "Enter a valid code, name and non-negative quantities.")
+    if db.query(Product).filter_by(product_code=code).first():
+        raise HTTPException(409, "Product code already exists.")
+    product = Product(product_code=code, name=name, unit=unit[:20], quantity=qty, min_stock=minimum)
+    db.add(product)
+    db.flush()
+    if qty:
+        create_transaction(db, item_type="Finished Good", item_id=product.id, item_name=name,
+                           transaction_type="Stock In", quantity=qty, note="Opening stock")
+    db.commit()
+    db.refresh(product)
+    return serialize_product(product)
+
+@app.put("/api/products/{product_id}")
+def edit_product(request: Request, product_id: int, payload: dict, db: Session = Depends(get_db)):
+    auth(request)
+    product = db.get(Product, product_id)
+    if not product:
+        raise HTTPException(404, "Product not found.")
+    name = str(payload.get("name", "")).strip()
+    unit = str(payload.get("unit", product.unit)).strip()
+    try:
+        minimum = Decimal(str(payload.get("min_stock", product.min_stock)))
+        if not name or len(name) > 120 or minimum < 0:
+            raise ValueError()
+    except (InvalidOperation, ValueError):
+        raise HTTPException(400, "Enter a product name and non-negative minimum stock.")
+    product.name = name
+    product.unit = unit[:20] or "units"
+    product.min_stock = minimum
+    db.commit()
+    db.refresh(product)
+    return serialize_product(product)
+
+@app.delete("/api/products/{product_id}")
+def delete_product(request: Request, product_id: int, db: Session = Depends(get_db)):
+    auth(request)
+    product = db.get(Product, product_id)
+    if not product:
+        raise HTTPException(404, "Product not found.")
+    if db.query(ProductionOrder).filter_by(product_id=product_id).count():
+        raise HTTPException(409, "This product has production history and cannot be deleted.")
+    db.delete(product)
+    db.commit()
+    return {"ok": True}
+
+@app.post("/api/stock-adjustments")
+def stock_adjustment(request: Request, payload: dict, db: Session = Depends(get_db)):
+    auth(request)
+    item_type = str(payload.get("item_type", ""))
+    transaction_type = str(payload.get("transaction_type", ""))
+    if item_type not in {"Raw Material", "Finished Good"} or transaction_type not in {"Stock In", "Stock Out"}:
+        raise HTTPException(400, "Choose a valid inventory item type and stock movement.")
+    try:
+        item_id = int(payload.get("item_id"))
+        quantity = Decimal(str(payload.get("quantity")))
+        if quantity <= 0:
+            raise ValueError()
+    except (TypeError, ValueError, InvalidOperation):
+        raise HTTPException(400, "Quantity must be a positive number.")
+    model = RawMaterial if item_type == "Raw Material" else Product
+    item = db.get(model, item_id)
+    if not item:
+        raise HTTPException(404, "Inventory item not found.")
+    current = Decimal(item.quantity)
+    if transaction_type == "Stock Out" and quantity > current:
+        raise HTTPException(400, f"Insufficient stock. Available: {current} {item.unit}.")
+    item.quantity = current + quantity if transaction_type == "Stock In" else current - quantity
+    create_transaction(db, item_type=item_type, item_id=item.id, item_name=item.name,
+                       transaction_type=transaction_type, quantity=quantity,
+                       reference=str(payload.get("reference", "")).strip()[:50] or None,
+                       note=str(payload.get("note", "")).strip()[:2000] or "Manual stock adjustment")
+    db.commit()
+    db.refresh(item)
+    return {"ok": True, "item": serialize_material(item) if item_type == "Raw Material" else serialize_product(item)}
+
