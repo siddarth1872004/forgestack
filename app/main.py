@@ -15,7 +15,7 @@ from .services import seed_demo, dashboard, consume_material, complete_order, cr
 BASE = Path(__file__).parent
 
 def verify_password(password: str, stored_hash: str) -> bool:
-    # Accept plaintext seed credentials only when demo mode is explicitly enabled.
+    # Accept PBKDF2-SHA256 hashes. Legacy plaintext is permitted only in opt-in demo mode.
     if stored_hash.startswith("pbkdf2_sha256$"):
         try:
             import hashlib, hmac, base64
@@ -38,7 +38,6 @@ templates = Jinja2Templates(directory=str(BASE / "templates"))
 @app.on_event("startup")
 def startup():
     init_db()
-    # Sample content is opt-in. New production databases start empty.
     if os.getenv("SEED_DEMO_DATA", "").lower() in {"1", "true", "yes"}:
         db = SessionLocal()
         try:
@@ -50,7 +49,6 @@ def auth(request: Request):
     if not request.session.get("user"):
         raise HTTPException(status_code=401, detail="Authentication required")
 
-# Use a Vercel environment variable in production; the fallback is local-only.
 from starlette.middleware.sessions import SessionMiddleware
 app.add_middleware(
     SessionMiddleware,
