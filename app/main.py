@@ -156,18 +156,27 @@ def materials(request: Request, q: str = "", category: str = "", db: Session = D
 @app.post("/api/materials")
 def add_material(request: Request, payload: dict, db: Session = Depends(get_db)):
     auth(request)
+    code = str(payload.get("code", "")).strip()
+    name = str(payload.get("name", "")).strip()
+    unit = str(payload.get("unit", "")).strip()
     try:
-        qty, minimum = Decimal(str(payload["quantity"])), Decimal(str(payload["min_stock"]))
-        if qty < 0 or minimum < 0: raise ValueError()
-    except (KeyError, InvalidOperation, ValueError): raise HTTPException(400, "Quantity values must be valid non-negative numbers.")
-    if db.query(RawMaterial).filter(RawMaterial.material_code == payload["code"]).first(): raise HTTPException(409, "Material code already exists.")
-    category = db.query(RawMaterialCategory).filter_by(name=payload["category"]).first()
-    if not category: raise HTTPException(400, "Unknown category.")
+        qty, minimum = Decimal(str(payload.get("quantity", 0))), Decimal(str(payload.get("min_stock", 0)))
+        if (not code or len(code) > 30 or not name or len(name) > 120 or not unit or len(unit) > 20
+                or not qty.is_finite() or not minimum.is_finite() or qty < 0 or minimum < 0):
+            raise ValueError()
+    except (InvalidOperation, ValueError):
+        raise HTTPException(400, "Enter a valid code, name, unit and non-negative quantities.")
+    if db.query(RawMaterial).filter(RawMaterial.material_code == code).first():
+        raise HTTPException(409, "Material code already exists.")
+    category_name = str(payload.get("category", "")).strip()
+    category = db.query(RawMaterialCategory).filter_by(name=category_name).first()
+    if not category:
+        raise HTTPException(400, "Unknown category.")
     supplier_id = payload.get("supplier_id")
     supplier = db.get(Supplier, int(supplier_id)) if supplier_id not in (None, "", 0, "0") else None
     if supplier_id not in (None, "", 0, "0") and not supplier:
         raise HTTPException(400, "Unknown supplier.")
-    m = RawMaterial(material_code=payload["code"].strip(), name=payload["name"].strip(), unit=payload["unit"], quantity=qty, min_stock=minimum, category=category, supplier=supplier)
+    m = RawMaterial(material_code=code, name=name, unit=unit, quantity=qty, min_stock=minimum, category=category, supplier=supplier)
     db.add(m); db.flush()
     if qty: create_transaction(db, item_type="Raw Material", item_id=m.id, item_name=m.name, transaction_type="Stock In", quantity=qty, note="Opening stock")
     db.commit(); return serialize_material(m)
@@ -276,8 +285,13 @@ def consumptions(request: Request, q: str = "", db: Session = Depends(get_db)):
 @app.get("/api/reports")
 def reports(request: Request, kind: str="inventory", q: str="", from_date: str="", to_date: str="", db: Session=Depends(get_db)):
     auth(request)
-    start = datetime.fromisoformat(from_date) if from_date else None
-    end = datetime.fromisoformat(to_date).replace(hour=23, minute=59, second=59) if to_date else None
+    try:
+        start = datetime.fromisoformat(from_date) if from_date else None
+        end = datetime.fromisoformat(to_date).replace(hour=23, minute=59, second=59) if to_date else None
+    except ValueError:
+        raise HTTPException(400, "Report dates must use YYYY-MM-DD format.")
+    if start and end and start > end:
+        raise HTTPException(400, "The report start date must be on or before the end date.")
     if kind == "production":
         query = db.query(ProductionOrder).options(joinedload(ProductionOrder.product)).order_by(desc(ProductionOrder.created_at))
         if start: query = query.filter(ProductionOrder.created_at >= start)
