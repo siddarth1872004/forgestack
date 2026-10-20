@@ -147,6 +147,23 @@ module.exports = async (req, res) => {
     if (path === 'alerts') return json(res, 200, { items: rows(await query(`select id,material_code as code,name,quantity::float,min_stock::float,unit from raw_materials where quantity <= min_stock order by quantity asc`)) });
     if (path === 'purchases' && method === 'GET') return json(res, 200, { items: rows(await query(`select p.id,p.purchase_code as code,p.status,p.ordered_at,p.received_at,s.name as supplier from purchase_orders p left join suppliers s on s.id=p.supplier_id order by p.ordered_at desc`)) });
     if (path === 'sales' && method === 'GET') return json(res, 200, { items: rows(await query('select id,sale_code as code,customer_name,status,created_at,dispatched_at from sales_orders order by created_at desc')) });
+    if (path === 'purchases' && method === 'POST') {
+      const materialId = Number(payload.material_id), quantity = numeric(payload.quantity, 'Quantity');
+      if (!Number.isInteger(materialId) || !quantity) return fail(res, 400, 'Choose a material and quantity.');
+      const client = await db().connect();
+      try { await client.query('begin'); const code=`PO-${Date.now().toString().slice(-8)}`;
+        const order=(await client.query('insert into purchase_orders(purchase_code,supplier_id,status) values($1,$2,$3) returning id,purchase_code as code,status,ordered_at', [code,payload.supplier_id||null,'Received'])).rows[0];
+        const material=(await client.query('select id,name from raw_materials where id=$1 for update',[materialId])).rows[0]; if(!material) throw Error('Material not found.');
+        await client.query('insert into purchase_order_items(purchase_order_id,material_id,quantity) values($1,$2,$3)',[order.id,materialId,quantity]); await client.query('update raw_materials set quantity=quantity+$1 where id=$2',[quantity,materialId]); await transaction(client,{itemType:'Raw Material',itemId:materialId,itemName:material.name,type:'Stock In',quantity,reference:code,note:'Purchase received'}); await client.query('commit'); return json(res,200,order);
+      } catch(error){await client.query('rollback');return fail(res,400,error.message)} finally{client.release()}
+    }
+    if (path === 'sales' && method === 'POST') {
+      const productId = Number(payload.product_id), quantity = numeric(payload.quantity, 'Quantity');
+      if (!payload.customer_name?.trim() || !Number.isInteger(productId) || !quantity) return fail(res,400,'Customer, product and quantity are required.');
+      const client=await db().connect(); try {await client.query('begin'); const product=(await client.query('select id,name,quantity from products where id=$1 for update',[productId])).rows[0]; if(!product) throw Error('Product not found.'); if(Number(product.quantity)<quantity) throw Error('Insufficient finished-goods stock.'); const code=`SO-${Date.now().toString().slice(-8)}`;
+        const sale=(await client.query(`insert into sales_orders(sale_code,customer_name,status,dispatched_at) values($1,$2,'Dispatched',now()) returning id,sale_code as code,customer_name,status,created_at,dispatched_at`,[code,payload.customer_name.trim()])).rows[0]; await client.query('insert into sales_order_items(sales_order_id,product_id,quantity) values($1,$2,$3)',[sale.id,productId,quantity]); await client.query('update products set quantity=quantity-$1 where id=$2',[quantity,productId]); await transaction(client,{itemType:'Finished Good',itemId:productId,itemName:product.name,type:'Stock Out',quantity,reference:code,note:`Dispatched to ${payload.customer_name.trim()}`}); await client.query('commit');return json(res,200,sale);
+      }catch(error){await client.query('rollback');return fail(res,400,error.message)}finally{client.release()}
+    }
     if (path === 'orders' && method === 'GET') return json(res, 200, { items: rows(await query(`select o.id,o.order_code as code,p.name as product,o.product_id,o.quantity::float,o.status,o.created_at,o.started_at,o.completed_at from production_orders o join products p on p.id=o.product_id order by o.created_at desc`)) });
     if (path === 'orders' && method === 'POST') {
       const quantity = numeric(payload.quantity, 'Production quantity'); if (!quantity) return fail(res, 400, 'Production quantity must be greater than zero.');
