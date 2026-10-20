@@ -63,7 +63,11 @@ def startup():
         # Never create a predictable production password or expose this workflow publicly.
         admin_username = os.getenv("ADMIN_USERNAME", "").strip()
         admin_password = os.getenv("ADMIN_PASSWORD", "")
+        if bool(admin_username) != bool(admin_password):
+            raise RuntimeError("Set both ADMIN_USERNAME and ADMIN_PASSWORD to provision the first administrator.")
         if admin_username and admin_password:
+            if len(admin_username) > 80:
+                raise RuntimeError("ADMIN_USERNAME must be 80 characters or fewer.")
             if len(admin_password) < 12:
                 raise RuntimeError("ADMIN_PASSWORD must be at least 12 characters.")
             existing = db.query(User).filter_by(username=admin_username).first()
