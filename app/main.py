@@ -90,18 +90,18 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health():
-    configured = bool(os.getenv("DATABASE_URL", "").strip())
+    raw_url = os.getenv("DATABASE_URL", "").strip()
+    configured = bool(raw_url)
+    mode = "supabase" if raw_url.startswith(("postgres://", "postgresql://", "postgresql+psycopg://")) else "local-sqlite"
     try:
         from sqlalchemy import text
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
-        return {"status": "ok", "database_configured": configured, "database_connected": True,
-                "mode": "supabase" if configured else "local-sqlite"}
+        return {"status": "ok", "database_configured": configured, "database_connected": True, "mode": mode}
     except Exception:
         # Deliberately avoid returning credentials, hostnames, or raw DB errors.
         return JSONResponse({"status": "error", "database_configured": configured,
-                             "database_connected": False, "mode": "supabase" if configured else "local-sqlite"},
-                            status_code=503)
+                             "database_connected": False, "mode": mode}, status_code=503)
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
