@@ -144,6 +144,11 @@ module.exports = async (req, res) => {
       if (!payload.username?.trim() || !payload.role) return fail(res, 400, 'Username and role are required.');
       return json(res, 200, (await query('insert into app_users(username,role) values($1,$2) returning id,username,role,is_active,created_at', [payload.username.trim(), payload.role])).rows[0]);
     }
+    const userRoute = path.match(/^users\/(\d+)$/);
+    if (userRoute && method === 'PUT') {
+      const result = await query('update app_users set role=$1,is_active=$2 where id=$3 returning id,username,role,is_active,created_at', [payload.role, Boolean(payload.is_active), userRoute[1]]);
+      return result.rowCount ? json(res, 200, result.rows[0]) : fail(res, 404, 'User not found.');
+    }
     if (path === 'alerts') return json(res, 200, { items: rows(await query(`select id,material_code as code,name,quantity::float,min_stock::float,unit from raw_materials where quantity <= min_stock order by quantity asc`)) });
     if (path === 'purchases' && method === 'GET') return json(res, 200, { items: rows(await query(`select p.id,p.purchase_code as code,p.status,p.ordered_at,p.received_at,s.name as supplier from purchase_orders p left join suppliers s on s.id=p.supplier_id order by p.ordered_at desc`)) });
     if (path === 'sales' && method === 'GET') return json(res, 200, { items: rows(await query('select id,sale_code as code,customer_name,status,created_at,dispatched_at from sales_orders order by created_at desc')) });
