@@ -117,9 +117,16 @@ module.exports = async (req, res) => {
     }
     if (path === 'products' && method === 'GET') return json(res, 200, { items: rows(await query(`${productSelect} order by name`)).map(serializeProduct) });
     if (path === 'products' && method === 'POST') {
-      const quantity = numeric(payload.quantity), minStock = numeric(payload.min_stock, 'Minimum stock');
-      const result = await query(`insert into products(product_code,name,unit,quantity,min_stock) values($1,$2,$3,$4,$5) returning id`, [payload.code, payload.name, payload.unit || 'units', quantity, minStock]);
-      return json(res, 200, serializeProduct((await query(`${productSelect} where id=$1`, [result.rows[0].id])).rows[0]));
+      const code = String(payload.code || '').trim(), name = String(payload.name || '').trim(), unit = String(payload.unit || 'units').trim() || 'units';
+      if (!code || !name) return fail(res, 400, 'Product code and name are required.');
+      const quantity = numeric(payload.quantity, 'Opening quantity'), minStock = numeric(payload.min_stock, 'Minimum stock');
+      try {
+        const result = await query(`insert into products(product_code,name,unit,quantity,min_stock) values($1,$2,$3,$4,$5) returning id`, [code, name, unit, quantity, minStock]);
+        return json(res, 200, serializeProduct((await query(`${productSelect} where id=$1`, [result.rows[0].id])).rows[0]));
+      } catch (error) {
+        if (error.code === '23505') return fail(res, 409, 'Product code already exists.');
+        throw error;
+      }
     }
     if (path === 'inventory') {
       const [materials, products] = await Promise.all([query(`${itemSelect} order by r.name`), query(`${productSelect} order by name`)]);
