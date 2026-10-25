@@ -10,6 +10,8 @@ ForgeStock is a Node.js inventory and production dashboard backed by Supabase Po
 4. Deploy and sign in as `admin` with `ADMIN_PASSWORD`.
 5. Check `/api/health` for database connectivity.
 
+**Important:** use the Supabase *Transaction pooler* connection string (port 6543) for `DATABASE_URL`. The direct `db.<ref>.supabase.co:5432` host is IPv6-only, which makes Vercel functions hang or time out.
+
 `DATABASE_URL` remains server-side and also derives the session signature, avoiding a separate session-secret variable.
 
 ## Local development
