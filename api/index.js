@@ -8,7 +8,7 @@ const db = () => {
   // Serverless: one connection per instance, fail fast instead of hanging until the function times out.
   pool ||= new Pool({
     connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false },
-    max: 1, idleTimeoutMillis: 10000, connectionTimeoutMillis: 8000, query_timeout: 12000, statement_timeout: 12000, allowExitOnIdle: true
+    max: 3, idleTimeoutMillis: 10000, connectionTimeoutMillis: 8000, query_timeout: 12000, statement_timeout: 12000, allowExitOnIdle: true
   });
   pool.on('error', error => console.error('Idle database client error', error.message));
   return pool;
