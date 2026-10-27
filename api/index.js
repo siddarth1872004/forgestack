@@ -125,9 +125,10 @@ module.exports = async (req, res) => {
       if (!/^[a-zA-Z0-9_.-]{3,40}$/.test(username)) return fail(res, 400, 'Username must be 3–40 characters using letters, numbers, dots, underscores or hyphens.');
       if (password.length < 8) return fail(res, 400, 'Password must be at least 8 characters.');
       try {
-        const result = await query(`insert into app_users(username,password_hash,role)
-          select $1,$2,case when not exists (select 1 from app_users) then 'Admin' else 'Viewer' end
-          returning username,role`, [username, hashPassword(password)]);
+        // When the legacy administrator password is configured, it already represents the admin account.
+        // Never grant public sign-ups admin privileges in that deployment.
+        const role = !process.env.ADMIN_PASSWORD && !(await query('select 1 from app_users limit 1')).rowCount ? 'Admin' : 'Viewer';
+        const result = await query('insert into app_users(username,password_hash,role) values($1,$2,$3) returning username,role', [username, hashPassword(password), role]);
         const user = result.rows[0];
         res.setHeader('Set-Cookie', `forgestock_session=${token(user.username)}; Path=/; HttpOnly; SameSite=Lax; ${process.env.VERCEL ? 'Secure; ' : ''}Max-Age=28800`);
         return json(res, 201, { ok: true, username: user.username, role: user.role });
