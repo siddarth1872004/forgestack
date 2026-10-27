@@ -106,13 +106,16 @@ module.exports = async (req, res) => {
     if (!requireAuth(req, res)) return;
 
     if (path === 'dashboard') {
-      const [materials, low, finished, active, completed, transactions] = await Promise.all([
+      const [materials, low, finished, active, completed, transactions, categoryStock, productionStatus, activityTrend] = await Promise.all([
         query('select count(*)::int as count from raw_materials'), query('select count(*)::int as count from raw_materials where quantity <= min_stock'),
         query('select coalesce(sum(quantity),0)::float as value from products'), query(`select count(*)::int as count from production_orders where status in ('Pending','In Progress')`),
         query(`select o.id,o.order_code as code,p.name as product,o.quantity::float,o.status,o.created_at,o.completed_at from production_orders o join products p on p.id=o.product_id where o.status='Completed' order by o.completed_at desc limit 5`),
-        query(`select id,item_type,item_name,transaction_type as type,quantity::float,reference,note,created_at from inventory_transactions order by created_at desc limit 8`)
+        query(`select id,item_type,item_name,transaction_type as type,quantity::float,reference,note,created_at from inventory_transactions order by created_at desc limit 8`),
+        query(`select c.name as category, coalesce(sum(r.quantity),0)::float as quantity from raw_material_categories c left join raw_materials r on r.category_id=c.id group by c.id,c.name order by quantity desc`),
+        query(`select status,count(*)::int as count from production_orders group by status order by count desc`),
+        query(`select to_char(days.day,'Dy') as day, coalesce(sum(t.quantity) filter (where t.transaction_type='Stock In'),0)::float as stock_in, coalesce(sum(t.quantity) filter (where t.transaction_type='Stock Out'),0)::float as stock_out from generate_series(current_date - interval '6 days',current_date,interval '1 day') days(day) left join inventory_transactions t on t.created_at >= days.day and t.created_at < days.day + interval '1 day' group by days.day order by days.day`)
       ]);
-      return json(res, 200, { total_materials: materials.rows[0].count, low_stock: low.rows[0].count, finished_qty: finished.rows[0].value, active_orders: active.rows[0].count, completed: rows(completed), transactions: rows(transactions) });
+      return json(res, 200, { total_materials: materials.rows[0].count, low_stock: low.rows[0].count, finished_qty: finished.rows[0].value, active_orders: active.rows[0].count, completed: rows(completed), transactions: rows(transactions), category_stock: rows(categoryStock), production_status: rows(productionStatus), activity_trend: rows(activityTrend) });
     }
     if (path === 'materials' && method === 'GET') {
       const result = await query(`${itemSelect} order by r.name`);
