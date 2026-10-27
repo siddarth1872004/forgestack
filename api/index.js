@@ -92,17 +92,48 @@ module.exports = async (req, res) => {
         return json(res, 503, { status: 'error', database_configured: Boolean(process.env.DATABASE_URL), database_connected: false, mode: 'supabase', error: error.code || error.message });
       }
     }
-    await bootstrap();
-    if (path === 'session') return json(res, 200, { authenticated: authorised(req), username: authorised(req) ? 'admin' : null });
-    if (path === 'login' && method === 'POST') {
-      if (!passwordMatches(payload.password)) return fail(res, 401, 'Invalid password.');
-      res.setHeader('Set-Cookie', `forgestock_session=${token()}; Path=/; HttpOnly; SameSite=Lax; ${process.env.VERCEL ? 'Secure; ' : ''}Max-Age=28800`);
-      return json(res, 200, { ok: true, username: 'admin' });
+    if (path === 'session') {
+      const username = sessionUser(req);
+      return json(res, 200, { authenticated: Boolean(username), username });
     }
     if (path === 'logout' && method === 'POST') {
-      res.setHeader('Set-Cookie', 'forgestock_session=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0');
+      res.setHeader('Set-Cookie', `forgestock_session=; Path=/; HttpOnly; SameSite=Lax; ${process.env.VERCEL ? 'Secure; ' : ''}Max-Age=0`);
       return json(res, 200, { ok: true });
     }
+    if (path === 'login' && method === 'POST') {
+      const username = String(payload.username || 'admin').trim();
+      if (username === 'admin' && passwordMatches(payload.password)) {
+        res.setHeader('Set-Cookie', `forgestock_session=${token('admin')}; Path=/; HttpOnly; SameSite=Lax; ${process.env.VERCEL ? 'Secure; ' : ''}Max-Age=28800`);
+        return json(res, 200, { ok: true, username: 'admin' });
+      }
+      await bootstrap();
+      const result = await query('select username,password_hash,is_active from app_users where username=$1', [username]);
+      const user = result.rows[0];
+      if (!user || !user.is_active || !user.password_hash || !verifyPassword(payload.password, user.password_hash)) {
+        return fail(res, 401, 'Invalid username or password.');
+      }
+      res.setHeader('Set-Cookie', `forgestock_session=${token(user.username)}; Path=/; HttpOnly; SameSite=Lax; ${process.env.VERCEL ? 'Secure; ' : ''}Max-Age=28800`);
+      return json(res, 200, { ok: true, username: user.username });
+    }
+    if (path === 'register' && method === 'POST') {
+      await bootstrap();
+      const username = String(payload.username || '').trim();
+      const password = String(payload.password || '');
+      if (!/^[a-zA-Z0-9_.-]{3,40}$/.test(username)) return fail(res, 400, 'Username must be 3–40 characters using letters, numbers, dots, underscores or hyphens.');
+      if (password.length < 8) return fail(res, 400, 'Password must be at least 8 characters.');
+      try {
+        const result = await query(`insert into app_users(username,password_hash,role)
+          select $1,$2,case when not exists (select 1 from app_users) then 'Admin' else 'Viewer' end
+          returning username,role`, [username, hashPassword(password)]);
+        const user = result.rows[0];
+        res.setHeader('Set-Cookie', `forgestock_session=${token(user.username)}; Path=/; HttpOnly; SameSite=Lax; ${process.env.VERCEL ? 'Secure; ' : ''}Max-Age=28800`);
+        return json(res, 201, { ok: true, username: user.username, role: user.role });
+      } catch (error) {
+        if (error.code === '23505') return fail(res, 409, 'That username already exists.');
+        throw error;
+      }
+    }
+    await bootstrap();
     if (!requireAuth(req, res)) return;
 
     if (path === 'dashboard') {
@@ -168,8 +199,15 @@ module.exports = async (req, res) => {
     }
     if (path === 'users' && method === 'GET') return json(res, 200, { items: rows(await query('select id,username,role,is_active,created_at from app_users order by username')) });
     if (path === 'users' && method === 'POST') {
-      if (!payload.username?.trim() || !payload.role) return fail(res, 400, 'Username and role are required.');
-      return json(res, 200, (await query('insert into app_users(username,role) values($1,$2) returning id,username,role,is_active,created_at', [payload.username.trim(), payload.role])).rows[0]);
+      const username = String(payload.username || '').trim(), password = String(payload.password || '');
+      if (!/^[a-zA-Z0-9_.-]{3,40}$/.test(username) || !payload.role) return fail(res, 400, 'A valid username and role are required.');
+      if (password.length < 8) return fail(res, 400, 'Password must be at least 8 characters.');
+      try {
+        return json(res, 201, (await query('insert into app_users(username,password_hash,role) values($1,$2,$3) returning id,username,role,is_active,created_at', [username, hashPassword(password), payload.role])).rows[0]);
+      } catch (error) {
+        if (error.code === '23505') return fail(res, 409, 'That username already exists.');
+        throw error;
+      }
     }
     const userRoute = path.match(/^users\/(\d+)$/);
     if (userRoute && method === 'PUT') {
